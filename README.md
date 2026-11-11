@@ -1,4 +1,4 @@
-# 智投 · job-hunter-agent
+# BOSS智能投递助手 · job-hunter-agent
 
 本地运行的 BOSS 岗位筛选与沟通助手：检索条件 → JD读取 → 规则/模型评审 → 收藏及沟通 → 每日分批简报。
 
