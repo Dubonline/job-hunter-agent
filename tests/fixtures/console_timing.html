@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>本地控制台计时实验</title>
+<h1>本地控制台计时实验</h1>
+<p>仅比较自造对象的 table/log 输出耗时；不会关闭、回退或访问外部网站。</p>
+<nav aria-label="模拟已登录导航"><a href="#messages">消息</a> <a href="#resume">简历</a></nav>
+<form id="search-form">
+  <label for="keyword">岗位关键词</label><input id="keyword" name="keyword">
+  <button id="search" type="submit">搜索</button>
+</form>
+<section id="results" aria-label="模拟检索结果"></section>
+<article id="detail" aria-label="模拟职位详情"></article>
+<iframe id="fixture-frame" title="本地子页面" srcdoc="<p id='frame-marker'>local-frame-ok</p>"></iframe>
+<script>
+document.querySelector('#search-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const keyword = document.querySelector('#keyword').value;
+  const results = document.querySelector('#results');
+  results.replaceChildren();
+  if (!'大模型应用开发工程师'.includes(keyword)) return;
+  const job = document.createElement('button');
+  job.type = 'button';
+  job.dataset.jobId = 'agent-app';
+  job.textContent = '大模型应用开发工程师（Agent方向）';
+  job.addEventListener('click', () => {
+    document.querySelector('#detail').textContent =
+      '本地模拟职位：负责 RAG 和 Agent 应用开发。要求 Python 与接口集成经验。';
+  });
+  results.append(job);
+});
+window.runTimingProbe = async function (rounds = 10) {
+  const object = Object.fromEntries(Array.from({length: 500}, (_, i) => [String(i), String(i)]));
+  const data = Array.from({length: 50}, () => object);
+  const samples = [];
+  let peakLogMs = 0;
+  for (let i = 0; i < rounds; i++) {
+    const beforeTable = Date.now();
+    console.table(data);
+    const tableMs = Date.now() - beforeTable;
+    const beforeLog = Date.now();
+    console.log(data);
+    const logMs = Date.now() - beforeLog;
+    peakLogMs = Math.max(peakLogMs, logMs);
+    console.clear();
+    samples.push({tableMs, logMs, peakLogMs,
+      exceedsTenfold: tableMs > 0 && peakLogMs > 0 && tableMs > 10 * peakLogMs});
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  return {visibilityState: document.visibilityState, hasFocus: document.hasFocus(),
+    samples, thresholdHits: samples.filter(sample => sample.exceedsTenfold).length};
+};
+</script>
+</html>

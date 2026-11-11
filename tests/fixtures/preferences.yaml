@@ -1,0 +1,69 @@
+# 仅用于合成单元测试，不是真实用户配置。
+schema_version: 1
+search:
+  keywords:
+  - 示例应用开发
+  cities:
+  - 上海
+  experience_filter: 3-5年
+  education_filter: 本科
+  salary_filter: 20-50K
+  district_filter: null
+  industry_filter: null
+  company_size_filter:
+  - 20-99人
+  - 100-499人
+  - 500-999人
+  financing_filter: null
+  job_type_filter: null
+  position_type_filter: null
+  job_hunting_type_filter: 全职
+salary:
+  currency: CNY
+  unit: k_per_month
+  target_min: 25
+  target_max: 30
+  hard_min_acceptable: null
+  reject_if_advertised_max_below_hard_min: false
+  include_negotiable: review
+hard_exclusions:
+- id: base_city_not_shanghai
+  enabled: true
+  description: 测试规则：实际地址必须包含示例目标城市
+  policy: require_evidence
+- id: school_mentions
+  enabled: true
+  description: 测试规则：出现指定院校词语即排除
+  policy: mention_including_preference
+- id: english_working_language
+  enabled: false
+  description: 测试规则：必备英语工作语言
+  policy: require_evidence
+- id: algorithm_research_or_training
+  enabled: true
+  description: 测试规则：排除主要研究训练职责
+  policy: require_evidence
+soft_preferences:
+  prefer: []
+  avoid: []
+company_blacklist: []
+job_title_blacklist: []
+execution:
+  mode: review_only
+  max_jobs_per_run: 5
+  require_user_start: true
+  allow_auto_pagination: false
+  on_captcha: pause
+  on_login_expired: pause
+  on_ambiguous_dom: pause
+  save_debug_screenshot_on_error: false
+  skip_previously_decided: true
+  allow_list_scroll: true
+  max_scroll_rounds: 3
+  communication_target: 50
+  apply_max_jobs: 200
+  record_action_lists: false
+matching:
+  missing_required_domain_experience: reject
+  english_requires_high_fit: true
+  salary_requires_overlap: true

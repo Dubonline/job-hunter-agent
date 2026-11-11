@@ -1,0 +1,398 @@
+diff --git a/cli/src/mcp.rs b/cli/src/mcp.rs
+index dce1a28..57d0b2a 100644
+--- a/cli/src/mcp.rs
++++ b/cli/src/mcp.rs
+@@ -4,7 +4,9 @@
+ //! messages. Tool calls are delegated to the current binary in `--json` mode
+ //! so MCP behavior stays aligned with the normal CLI command surface. Daemon
+ //! lifecycle settings, including the default idle timeout, use the same CLI
+-//! parser and daemon as direct commands.
++//! parser and daemon as direct commands. AGENT_BROWSER_RUNTIME_EVENTS is passed
++//! to child CLI processes; console/error tools request the same lazy subscription
++//! as their canonical CLI commands.
+ //! Owned Windows Chrome uses the same private headless desktop and Job Object
+ //! lifetime through MCP; headed and external-connection semantics are unchanged.
+ 
+@@ -4500,9 +4502,17 @@ fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Resu
+     let exe = env::current_exe().map_err(|e| e.to_string())?;
+     let mut command = Command::new(exe);
+     command.args(args);
++    apply_runtime_events_environment(&mut command, env::var_os("AGENT_BROWSER_RUNTIME_EVENTS"));
+     run_command(command, stdin_body, timeout_ms)
+ }
+ 
++/// Preserve the runtime event policy when an MCP tool delegates to the CLI.
++fn apply_runtime_events_environment(command: &mut Command, value: Option<std::ffi::OsString>) {
++    if let Some(value) = value {
++        command.env("AGENT_BROWSER_RUNTIME_EVENTS", value);
++    }
++}
++
+ fn append_timeout_message(stderr: String, timeout_ms: u64) -> String {
+     let msg = format!("agent-browser command timed out after {}ms", timeout_ms);
+     if stderr.trim().is_empty() {
+@@ -4741,6 +4751,23 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn runtime_events_policy_reaches_mcp_child_without_global_environment_changes() {
++        let mut command = std::process::Command::new("agent-browser");
++        super::apply_runtime_events_environment(&mut command, Some("on-demand".into()));
++        assert!(command
++            .get_envs()
++            .any(|(key, value)| key == "AGENT_BROWSER_RUNTIME_EVENTS"
++                && value == Some(std::ffi::OsStr::new("on-demand"))));
++        for name in ["console", "errors"] {
++            let args =
++                super::cli_tool_args(&serde_json::json!({}), vec![name.to_string()], None).unwrap();
++            let flags = crate::flags::parse_flags(&args);
++            let parsed =
++                crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
++            assert_eq!(parsed["action"], name);
++        }
++    }
+     #[test]
+     fn tool_text_keeps_response_warnings() {
+         let value = json!({ "success": true, "data": { "url": "about:blank" },
+diff --git a/cli/src/native/actions.rs b/cli/src/native/actions.rs
+index e7829cd..2c42159 100644
+--- a/cli/src/native/actions.rs
++++ b/cli/src/native/actions.rs
+@@ -4267,9 +4267,11 @@ async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) ->
+     client
+         .send_command_no_params("Page.enable", Some(session_id))
+         .await?;
+-    client
+-        .send_command_no_params("Runtime.enable", Some(session_id))
+-        .await?;
++    if client.runtime_events_enabled() {
++        client
++            .send_command_no_params("Runtime.enable", Some(session_id))
++            .await?;
++    }
+     client
+         .send_command_no_params("Network.enable", Some(session_id))
+         .await?;
+@@ -8013,6 +8015,12 @@ async fn handle_offline(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
+ 
+ async fn handle_console(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
++    if !clear {
++        if let Some(ref manager) = state.browser {
++            manager.ensure_runtime_events().await?;
++        }
++        state.drain_cdp_events_background().await?;
++    }
+     if clear {
+         state.event_tracker.clear_console();
+         Ok(json!({ "cleared": true }))
+@@ -8025,6 +8033,12 @@ async fn handle_console(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
+ /// Reads captured page errors or clears them when requested.
+ async fn handle_errors(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+     let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
++    if !clear {
++        if let Some(ref manager) = state.browser {
++            manager.ensure_runtime_events().await?;
++        }
++        state.drain_cdp_events_background().await?;
++    }
+     if clear {
+         state.event_tracker.clear_errors();
+         Ok(json!({ "cleared": true }))
+diff --git a/cli/src/native/browser.rs b/cli/src/native/browser.rs
+index 869d849..b86efaf 100644
+--- a/cli/src/native/browser.rs
++++ b/cli/src/native/browser.rs
+@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
+ use tokio::sync::{broadcast, Mutex};
+ 
+ use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
+-use super::cdp::client::CdpClient;
++use super::cdp::client::{runtime_events_from_env, CdpClient};
+ use super::cdp::discovery::discover_cdp_url_with_headers;
+ use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
+ use super::cdp::obscura::{
+@@ -640,6 +640,10 @@ impl BrowserManager {
+ 
+     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
+         let engine = engine.unwrap_or("chrome");
++        let runtime_events_enabled = runtime_events_from_env()?;
++        if !runtime_events_enabled && engine != "chrome" {
++            return Err("on-demand Runtime events currently require the chrome engine".to_string());
++        }
+ 
+         match engine {
+             "chrome" => {
+@@ -1026,6 +1030,15 @@ impl BrowserManager {
+         Ok(())
+     }
+ 
++    /// Request Runtime events for explicit console/error consumers.
++    /// This keeps subscriptions enabled for the rest of this manager's lifetime.
++    pub async fn ensure_runtime_events(&self) -> Result<(), String> {
++        let session_id = self.active_session_id()?;
++        self.client
++            .ensure_runtime_events((!session_id.is_empty()).then_some(session_id))
++            .await
++    }
++
+     async fn enable_domains(&self, session_id: &str) -> Result<(), String> {
+         self.prepare_domains(session_id).await?;
+         self.resume_if_waiting(session_id).await?;
+@@ -1036,9 +1049,11 @@ impl BrowserManager {
+         self.client
+             .send_command_no_params("Page.enable", Some(session_id))
+             .await?;
+-        self.client
+-            .send_command_no_params("Runtime.enable", Some(session_id))
+-            .await?;
++        if self.client.runtime_events_enabled() {
++            self.client
++                .send_command_no_params("Runtime.enable", Some(session_id))
++                .await?;
++        }
+         self.client
+             .send_command_no_params("Network.enable", Some(session_id))
+             .await?;
+@@ -1309,9 +1324,11 @@ impl BrowserManager {
+         self.client
+             .send_command_no_params("Page.enable", None)
+             .await?;
+-        self.client
+-            .send_command_no_params("Runtime.enable", None)
+-            .await?;
++        if self.client.runtime_events_enabled() {
++            self.client
++                .send_command_no_params("Runtime.enable", None)
++                .await?;
++        }
+         let _ = self
+             .client
+             .send_command_no_params("Runtime.runIfWaitingForDebugger", None)
+@@ -3007,6 +3024,90 @@ async fn resolve_cdp_url(input: &str, headers: &[(String, String)]) -> Result<St
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn runtime_events_setting_rejects_unknown_values() {
++        use super::super::cdp::client::parse_runtime_events_setting;
++        assert_eq!(parse_runtime_events_setting(None).unwrap(), true);
++        assert_eq!(parse_runtime_events_setting(Some("eager")).unwrap(), true);
++        assert_eq!(
++            parse_runtime_events_setting(Some("on-demand")).unwrap(),
++            false
++        );
++        assert!(parse_runtime_events_setting(Some("off")).is_err());
++    }
++
++    #[tokio::test]
++    async fn runtime_events_are_requested_once_and_inherited_by_target_setup() {
++        use futures_util::{SinkExt, StreamExt};
++        use tokio_tungstenite::tungstenite::Message;
++        for direct in [false, true] {
++            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++            let address = listener.local_addr().unwrap();
++            let recorded = Arc::new(Mutex::new(Vec::<Value>::new()));
++            let messages = Arc::clone(&recorded);
++            tokio::spawn(async move {
++                let (stream, _) = listener.accept().await.unwrap();
++                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
++                while let Some(Ok(Message::Text(text))) = ws.next().await {
++                    let request: Value = serde_json::from_str(&text).unwrap();
++                    messages.lock().await.push(request.clone());
++                    let response = json!({"id": request["id"], "result": {}});
++                    if ws.send(Message::Text(response.to_string())).await.is_err() {
++                        break;
++                    }
++                }
++            });
++            let url = format!("ws://{}", address);
++            let client = CdpClient::connect(&url).await.unwrap();
++            let mut manager = test_manager_from(client, url, vec![page(1, "local", "about:blank")]);
++            manager.client.set_runtime_events_for_test(false);
++            manager.direct_page = direct;
++            if direct {
++                manager.pages[0].session_id.clear();
++            }
++            if direct {
++                manager.enable_domains_direct().await.unwrap();
++            } else {
++                manager.prepare_domains("session-1").await.unwrap();
++            }
++            assert!(!recorded
++                .lock()
++                .await
++                .iter()
++                .any(|m| m["method"] == "Runtime.enable"));
++            manager.ensure_runtime_events().await.unwrap();
++            manager.ensure_runtime_events().await.unwrap();
++            let runtime: Vec<Value> = recorded
++                .lock()
++                .await
++                .iter()
++                .filter(|m| m["method"] == "Runtime.enable")
++                .cloned()
++                .collect();
++            assert_eq!(runtime.len(), 1);
++            if direct {
++                assert!(runtime[0].get("sessionId").is_none());
++            } else {
++                assert_eq!(runtime[0]["sessionId"], "session-1");
++            }
++            if direct {
++                manager.enable_domains_direct().await.unwrap();
++            } else {
++                manager.prepare_domains("session-1").await.unwrap();
++            }
++            assert_eq!(
++                recorded
++                    .lock()
++                    .await
++                    .iter()
++                    .filter(|m| m["method"] == "Runtime.enable")
++                    .count(),
++                2
++            );
++            manager.close().await.unwrap();
++        }
++    }
++
+     #[test]
+     fn cdp_port_address_needs_an_explicit_port() {
+         assert_eq!(cdp_port_address("9222").as_deref(), Some("127.0.0.1:9222"));
+diff --git a/cli/src/native/cdp/client.rs b/cli/src/native/cdp/client.rs
+index d347239..4fce067 100644
+--- a/cli/src/native/cdp/client.rs
++++ b/cli/src/native/cdp/client.rs
+@@ -155,7 +155,30 @@ fn extract_command_id(msg: &str) -> Option<u64> {
+     envelope.id.filter(|id| *id > 0)
+ }
+ 
++/// `on-demand` defers Runtime event delivery until a diagnostic consumer asks
++/// for it. Runtime.evaluate remains available without subscribing to events.
++pub(crate) fn parse_runtime_events_setting(value: Option<&str>) -> Result<bool, String> {
++    match value {
++        None | Some("eager") => Ok(true),
++        Some("on-demand") => Ok(false),
++        Some(other) => Err(format!(
++            "Invalid AGENT_BROWSER_RUNTIME_EVENTS '{}': expected eager or on-demand",
++            other
++        )),
++    }
++}
++
++pub(crate) fn runtime_events_from_env() -> Result<bool, String> {
++    parse_runtime_events_setting(
++        std::env::var("AGENT_BROWSER_RUNTIME_EVENTS")
++            .ok()
++            .as_deref(),
++    )
++}
++
+ pub struct CdpClient {
++    /// Shared subscription state for page and auto-attached target setup.
++    runtime_events_enabled: AtomicBool,
+     ws_tx: WsTx,
+     socket: socket2::Socket,
+     closed: Arc<AtomicBool>,
+@@ -238,6 +261,7 @@ impl CdpClient {
+         ws_config: WebSocketConfig,
+         connector: Option<Connector>,
+     ) -> Result<Self, String> {
++        let runtime_events_enabled = runtime_events_from_env()?;
+         let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+             request,
+             Some(ws_config),
+@@ -425,6 +449,7 @@ impl CdpClient {
+         });
+ 
+         Ok(Self {
++            runtime_events_enabled: AtomicBool::new(runtime_events_enabled),
+             ws_tx,
+             socket,
+             closed,
+@@ -543,6 +568,27 @@ impl CdpClient {
+         Ok(response.result.unwrap_or(Value::Null))
+     }
+ 
++    pub fn runtime_events_enabled(&self) -> bool {
++        self.runtime_events_enabled.load(Ordering::Relaxed)
++    }
++
++    /// Enable Runtime event delivery for an explicit diagnostic consumer.
++    /// The policy remains enabled for later target initialization on this client.
++    pub async fn ensure_runtime_events(&self, session_id: Option<&str>) -> Result<(), String> {
++        if !self.runtime_events_enabled() {
++            self.send_command_no_params("Runtime.enable", session_id)
++                .await?;
++            self.runtime_events_enabled.store(true, Ordering::Relaxed);
++        }
++        Ok(())
++    }
++
++    #[cfg(test)]
++    pub(crate) fn set_runtime_events_for_test(&self, enabled: bool) {
++        self.runtime_events_enabled
++            .store(enabled, Ordering::Relaxed);
++    }
++
+     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {
+         self.event_tx.subscribe()
+     }
+diff --git a/cli/src/native/state.rs b/cli/src/native/state.rs
+index 791691f..c9f7e37 100644
+--- a/cli/src/native/state.rs
++++ b/cli/src/native/state.rs
+@@ -163,9 +163,11 @@ async fn collect_storage_in_target(
+     client
+         .send_command_no_params("Page.enable", Some(temp_session))
+         .await?;
+-    client
+-        .send_command_no_params("Runtime.enable", Some(temp_session))
+-        .await?;
++    if client.runtime_events_enabled() {
++        client
++            .send_command_no_params("Runtime.enable", Some(temp_session))
++            .await?;
++    }
+ 
+     // Blank HTML response body, pre-encoded to avoid repeated base64 work per request
+     let blank_html_b64 = base64::engine::general_purpose::STANDARD.encode("<html></html>");
+diff --git a/cli/src/output.rs b/cli/src/output.rs
+index a89c6a3..7cb970c 100644
+--- a/cli/src/output.rs
++++ b/cli/src/output.rs
+@@ -4794,6 +4794,7 @@ Environment:
+   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
+   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
+   AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
++  AGENT_BROWSER_RUNTIME_EVENTS   eager (default) or on-demand; console/errors enable events
+   AGENT_BROWSER_SESSION_NAME     Legacy auto-save/load state persistence name
+   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
+   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
+diff --git a/docs/content/docs/configuration.mdx b/docs/content/docs/configuration.mdx
+index 1630d0a..cdbf3f6 100644
+--- a/docs/content/docs/configuration.mdx
++++ b/docs/content/docs/configuration.mdx
+@@ -325,6 +325,7 @@ These environment variables configure additional daemon and runtime behavior:
+     <tr><td><code>AGENT_BROWSER_CONFIRM_ACTIONS</code></td><td>Comma-separated action categories requiring confirmation.</td><td>(none)</td></tr>
+     <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts (auto-denies if stdin is not a TTY).</td><td>(disabled)</td></tr>
+     <tr><td><code>AGENT_BROWSER_ENGINE</code></td><td>Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>, <code>obscura</code> (experimental).</td><td><code>chrome</code></td></tr>
++    <tr><td><code>AGENT_BROWSER_RUNTIME_EVENTS</code></td><td>Experimental Chrome policy: <code>eager</code> or <code>on-demand</code>. A fresh daemon is required. On-demand mode subscribes when console or errors is requested and keeps events enabled for that connection. Earlier diagnostic history may be incomplete. MCP inherits this setting. Streaming alone does not request console or error history.</td><td><code>eager</code></td></tr>
+     <tr><td><code>AGENT_BROWSER_NO_AUTO_DIALOG</code></td><td>Disable automatic dismissal of <code>alert</code>/<code>beforeunload</code> dialogs.</td><td>(disabled)</td></tr>
+     <tr><td><code>AGENT_BROWSER_PLUGINS</code></td><td>JSON plugin registry override.</td><td>(config discovery)</td></tr>
+     <tr><td><code>AGENT_BROWSER_SCREENSHOT_DIR</code></td><td>Default screenshot output directory.</td><td>(temp directory)</td></tr>
+diff --git a/skill-data/core/references/commands.md b/skill-data/core/references/commands.md
+index cb067c4..d2b2366 100644
+--- a/skill-data/core/references/commands.md
++++ b/skill-data/core/references/commands.md
+@@ -581,6 +581,8 @@ agent-browser <command> --help        # Show detailed help for a command
+ 
+ ## Debugging
+ 
++This experimental build accepts `AGENT_BROWSER_RUNTIME_EVENTS=on-demand` for Chrome. Start a fresh session with that environment variable to defer Runtime event delivery. Page evaluation and normal interactions remain available. Reading `console` or `errors` subscribes to events for the rest of the browser connection. Clearing captured entries does not subscribe. Messages and errors from before subscription may be incomplete. Streaming alone does not request console or error history. The default is `eager`; this setting is inherited by MCP child commands and cannot be changed on an already running daemon.
++
+ On Windows, owned headless Chrome runs on a private desktop so hidden windows cannot draw stray rectangles over the user's desktop. This applies to custom Chrome executables and windows created later through CDP. Headed and extension sessions use the interactive desktop. Owned Chrome trees are terminated when their daemon exits, including forced termination; attaching to an external browser does not take ownership of it.
+ 
+ ```bash

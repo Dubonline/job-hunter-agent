@@ -1,0 +1,50 @@
+# 通用示例，不包含任何真实候选人的偏好或经历；请填写本机preferences.local.yaml。
+schema_version: 1
+search:
+  keywords:
+  - 应用开发
+  cities:
+  - 上海
+  experience_filter: null
+  education_filter: null
+  salary_filter: null
+  district_filter: null
+  industry_filter: null
+  company_size_filter: null
+  financing_filter: null
+  job_type_filter: null
+  position_type_filter: null
+  job_hunting_type_filter: null
+salary:
+  currency: CNY
+  unit: k_per_month
+  target_min: 20
+  target_max: 50
+  hard_min_acceptable: null
+  reject_if_advertised_max_below_hard_min: false
+  include_negotiable: review
+hard_exclusions: []
+soft_preferences:
+  prefer: []
+  avoid: []
+company_blacklist: []
+job_title_blacklist: []
+execution:
+  mode: review_only
+  max_jobs_per_run: 5
+  require_user_start: true
+  allow_auto_pagination: false
+  on_captcha: pause
+  on_login_expired: pause
+  on_ambiguous_dom: pause
+  save_debug_screenshot_on_error: false
+  skip_previously_decided: true
+  allow_list_scroll: true
+  max_scroll_rounds: 3
+  communication_target: 50
+  apply_max_jobs: 200
+  record_action_lists: false
+matching:
+  missing_required_domain_experience: review
+  english_requires_high_fit: false
+  salary_requires_overlap: true

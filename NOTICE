@@ -1,0 +1,6 @@
+job-hunter-agent
+Copyright 2026 job-hunter-agent contributors
+
+The patch under patches/ modifies agent-browser 0.42.0
+(https://github.com/vercel-labs/agent-browser), licensed under Apache-2.0.
+The upstream software is not vendored into this repository.

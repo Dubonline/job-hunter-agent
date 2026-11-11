@@ -1,0 +1,19 @@
+profile_version: 1
+education:
+  level: null
+  school_tier: null
+  is_full_time: null
+skills:
+  strengths: []
+  not_target_roles: []
+languages:
+  english_fluent: null
+  english_reading: null
+  english_spoken: null
+work_experience_years: null
+expected_salary_min: null
+expected_salary_max: null
+resume_summary: ''
+target_roles: []
+preferred_cities: []
+projects: []
