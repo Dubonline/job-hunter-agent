@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from job_hunter.extraction.boss_details import JobDetail
 from job_hunter.models.preferences import Candidate, Preferences
 
-ENGINE = 'local_rules_v3'  # 判断逻辑变化时更新版本，防止续跑混用不同规则的结果。
+ENGINE = 'local_rules_v4_recency'  # 判断逻辑变化时更新版本，防止续跑混用不同规则的结果。
 
 
 def norm(value):
@@ -130,7 +130,7 @@ def _evaluate(detail: JobDetail, preferences: Preferences, candidate: Candidate)
 
     if 'school_mentions' in enabled:
         for line in statements(text):
-            if re.search(r'985|211|双一流|一本', line):
+            if re.search(r'985|211|双一流|一本|重点(?:大学|院校|高校)', line):
                 return result('SKIP', '命中院校字样排除（含优先）', 'school_mentions', 'JD', line)
     if 'english_working_language' in enabled:
         for line in statements(text):
@@ -168,7 +168,9 @@ def _evaluate(detail: JobDetail, preferences: Preferences, candidate: Candidate)
 
     profile_business = norm(' '.join(candidate.skills.strengths + [p.business_scenario for p in candidate.projects]))
     profile_tasks = norm(' '.join(r for p in candidate.projects for r in p.responsibilities))
-    profile_tech = norm(' '.join(t for p in candidate.projects for t in p.technologies))
+    from job_hunter.evaluation.recency import cumulative_technologies, project_weights
+
+    profile_tech = norm(' '.join(cumulative_technologies(candidate)))
     training_known = bool(TRAINING.search(profile_tasks) or re.search(r'lora|模型微调', profile_tech))
     gaps = []
     for line in requirements:
@@ -219,6 +221,21 @@ def _evaluate(detail: JobDetail, preferences: Preferences, candidate: Candidate)
     # responsibilities. Generic Agent/RAG/framework terms alone are insufficient.
     workflow = '智能体执行与恢复' in task_matches or '研发工具链' in task_matches
     high = len(task_matches) >= 2 and (bool(domain_matches) or workflow)
+    if candidate.project_weighting.enabled:
+        high = False
+        for row, project in zip(project_weights(candidate), candidate.projects, strict=True):
+            if not row['focus'] or row['scenario_weight'] < .5:
+                continue
+            tasks = norm(' '.join(project.responsibilities))
+            business = norm(project.business_scenario)
+            matched_tasks = [label for label, pattern in RESPONSIBILITIES.items()
+                             if re.search(pattern, duty_text) and re.search(pattern, tasks)]
+            domain = any(re.search(pattern, duty_text) and re.search(pattern, business) for pattern in DOMAINS.values())
+            workflow_match = '智能体执行与恢复' in matched_tasks or '研发工具链' in matched_tasks
+            score = row['scenario_weight'] * (len(matched_tasks) + int(domain))
+            if score >= candidate.project_weighting.high_fit_support_threshold and len(matched_tasks) >= 2 and (domain or workflow_match):
+                high = True
+                break
     supporting = next((line for line in duties if any(re.search(RESPONSIBILITIES[m], norm(line)) for m in task_matches)), duties[0])
     decision = result('HIGH_FIT' if high else 'GENERAL',
                       '业务/执行流程及多项实质职责对应' if high else '应用研发方向可保留，未证明有显著场景优势',

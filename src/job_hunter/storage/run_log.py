@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 
 from job_hunter.settings import ConfigurationError
 
+READING_VERSION = 'response_dom_v1'  # 读取来源变更后，旧评审不能绕过新的双源核对。
+
 
 class RunLog:
     """最小运行日志；同版本续跑通过配置指纹和规则版本双重校验。"""
@@ -38,7 +40,8 @@ class RunLog:
                 }}
         record = {
             'at': datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(),
-            'run_id': self.run_id, 'config_version': self.fingerprint, **event,
+            'run_id': self.run_id, 'config_version': self.fingerprint,
+            'reading_version': READING_VERSION, **event,
         }
         # 跨进程共用锁；检查额度和持久化意图必须在同一个临界区，避免两个会话超额。
         with (self.path.parent / '.daily.lock').open('a') as lock:
@@ -73,6 +76,8 @@ class RunLog:
             raise ConfigurationError('RESUME_LOG_UNREADABLE') from None
         if not rows or any(row.get('config_version') != self.fingerprint for row in rows):
             raise ConfigurationError('RESUME_CONFIG_OR_PROFILE_CHANGED：不能混用两套条件/画像')
+        if any(row.get('reading_version') != READING_VERSION for row in rows):
+            raise ConfigurationError('RESUME_READING_CHANGED：旧结果未通过当前详情来源核对，不能续用')
         if rows[0].get('engine') != engine:
             raise ConfigurationError('RESUME_ENGINE_CHANGED：规则版本不同，需要重新判断')
         decisions = {}

@@ -1,4 +1,4 @@
-"""读取已加载的结果页DOM详情，仅留内存；完整性仍需展开/懒加载的独立验收。"""
+"""正式详情读取：同岗位响应优先，DOM/OCR核对及兜底；原文仅留内存。"""
 
 import asyncio
 import json
@@ -28,10 +28,10 @@ class JobCard:
 
 @dataclass(frozen=True)
 class JobDetail:
-    """已核对身份的DOM详情快照，不代表已验证整份JD完整。
+    """已核对身份的详情；响应优先并与DOM核对，无响应时保留DOM兜底。
 
     description不进入对象默认日志表示；innerText包含已渲染的屏幕外文本，
-    但尚未独立确认展开、按需加载或详情页预览截断，因此不能视为完整性证明。
+    reading记录实际来源与审计范围，不将单次双源一致说成服务端业务绝对完整。
     """
     card: JobCard
     description: str = field(repr=False)
@@ -40,7 +40,7 @@ class JobDetail:
     detail_company: str = ''
     detail_title: str = ''  # 详情完整标题，可能比卡片多出实际驻地等重要信息。
     salary_text: str = ''  # 当前详情显示的招聘月薪原文；无法解析时不猜测。
-    reading: dict = field(default_factory=dict)  # DOM读取来源、完整性检查及长度；不包含完整正文。
+    reading: dict = field(default_factory=dict)  # 响应/DOM/OCR来源、核对及长度；不包含完整正文。
 
 
 async def current_cards(session) -> list[JobCard]:
@@ -108,7 +108,7 @@ DETAIL_STATE = r"""(() => {
 
 
 async def open_detail(session, card: JobCard) -> JobDetail:
-    """在session中打开card的正文区域，连续两次身份/内容稳定后返回详情。
+    """打开card，核对稳定DOM与本次自然响应后返回；任何数据冲突停止。
 
     只点击岗位卡片，不点击公司链接、收藏或沟通。相同岗位ID的详情可能
     使用更完整的标题，须保留详情全称供实际base和岗位方向判断。
@@ -117,6 +117,13 @@ async def open_detail(session, card: JobCard) -> JobDetail:
     # Accept identities originating in the validated current-page catalog only.
     if not re.fullmatch(r'/job_detail/[A-Za-z0-9_-]+\.html', card.path):
         raise PageReadError('M3_JOB_CARD_IDENTITY_UNKNOWN')
+    from job_hunter.extraction.detail_response import (
+        begin_capture,
+        prefer_response,
+        read_captured,
+    )
+
+    previous_ids = await begin_capture(session)  # 本次点击前的请求集合，防止串用历史响应。
     selector = f'.job-card-box:has(a.job-name[href="{card.path}"]) .job-info'
     await session.evaluate(
         f'[...document.querySelectorAll({json.dumps(selector)})].find(e=>e.checkVisibility({{checkOpacity:true,checkVisibilityCSS:true}}))?.scrollIntoView({{block:"center",behavior:"instant"}})'
@@ -134,7 +141,12 @@ async def open_detail(session, card: JobCard) -> JobDetail:
             and state.get('description')
         ):
             if same_content(state, previous):
-                return await verify_loaded_dom(session, card, state)
+                detail = await verify_loaded_dom(session, card, state)
+                response, reason = await read_captured(session, previous_ids, card.job_id)
+                after = await session.evaluate(DETAIL_STATE)
+                if not same_content(after, state):
+                    raise PageReadError('DETAIL_RESPONSE_DOM_CHANGED_DURING_COMPARISON')
+                return prefer_response(detail, response, reason)
             previous = state
         else:
             previous = None

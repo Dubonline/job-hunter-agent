@@ -79,6 +79,21 @@ def test_resume_rejects_changed_profile_or_rules(tmp_path):
         changed.resume(first.run_id, 'test-v1')
 
 
+def test_resume_rejects_old_reading_pipeline(tmp_path):
+    """旧判断不能绕过响应/DOM冲突检查；历史日志只读、不回填或改写。"""
+    import json
+
+    preferences = load_yaml(Path(__file__).resolve().parents[2] / 'tests/fixtures/preferences.yaml', Preferences)
+    first = RunLog(preferences, Candidate(), tmp_path)
+    first.append({'event': 'run_start', 'engine': 'test-v1'})
+    rows = [json.loads(line) for line in first.path.read_text().splitlines()]
+    for row in rows:
+        row.pop('reading_version')
+    first.path.write_text('\n'.join(json.dumps(row) for row in rows) + '\n')
+    with pytest.raises(ConfigurationError, match='READING_CHANGED'):
+        RunLog(preferences, Candidate(), tmp_path).resume(first.run_id, 'test-v1')
+
+
 @pytest.mark.asyncio
 async def test_five_incomplete_jobs_stop_without_model_calls(monkeypatch):
     preferences = load_yaml(Path(__file__).resolve().parents[2] / 'tests/fixtures/preferences.yaml', Preferences)

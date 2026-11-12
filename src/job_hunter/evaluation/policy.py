@@ -44,6 +44,6 @@ def apply_policy(decision, detail, preferences, candidate):
             if decision.status in {'HIGH_FIT', 'GENERAL'}:
                 decision.status, decision.reason = 'REVIEW', '招聘月薪无法可靠读取，不允许自动沟通'
         elif advertised[0] > upper or advertised[1] < lower:
-            decision.status, decision.reason = 'SKIP', f"招聘月薪与期望{lower:g}–{upper:g}K无交集"
+            decision.status, decision.reason = 'SKIP', f'招聘月薪与期望{lower:g}–{upper:g}K无交集'
             decision.evidence.append(Evidence('salary_overlap', '招聘薪资', detail.salary_text))
     return decision

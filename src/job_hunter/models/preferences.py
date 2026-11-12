@@ -9,21 +9,39 @@ class ConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class EducationRecord(ConfigModel):
+    """保留每段教育原始记录，不因最后一条是大专而覆盖最高学历。"""
+    school: str
+    level: str
+    major: str | None = None
+    period: str | None = None
+
+
 class Education(ConfigModel):
     level: str | None = None
     school_tier: str | None = None
     is_full_time: bool | None = None
+    admission_route: str | None = None  # 如“统招专升本”，必须有用户确认或原文依据。
+    records: list[EducationRecord] = Field(default_factory=list)
 
 
 class Skills(ConfigModel):
     strengths: list[str] = Field(default_factory=list)
     not_target_roles: list[str] = Field(default_factory=list)
+    technologies: list[str] = Field(default_factory=list)  # 累积已确认技术，不按项目年代清除。
 
 
 class Languages(ConfigModel):
     english_fluent: bool | None = None
     english_reading: str | None = None  # 已确认的识读水平，不推断口语能力。
     english_spoken: bool | None = None  # 是否能够口语沟通。
+
+    @model_validator(mode='after')
+    def check_english_consistency(self) -> Self:
+        """拒绝“流利且不能口语沟通”的冲突，不替用户推断未知能力。"""
+        if self.english_fluent is True and self.english_spoken is False:
+            raise ValueError('英语流利与不能口语沟通不能同时成立')
+        return self
 
 
 class ProjectExperience(ConfigModel):
@@ -32,6 +50,23 @@ class ProjectExperience(ConfigModel):
     business_scenario: str
     responsibilities: list[str] = Field(default_factory=list)
     technologies: list[str] = Field(default_factory=list)
+
+
+class ProjectWeighting(ConfigModel):
+    """权重是匹配策略，不是履历事实；旧画像默认关闭以保持兼容，新入口启用。"""
+    enabled: bool = False
+    focus_since: str | None = None  # YYYY-MM；明确指定时优先于滚动窗口，不猜缺失项目日期。
+    focus_window_months: int = Field(default=30, ge=1, le=120)  # 未指定起点时重点窗口，单位月。
+    half_life_months: int = Field(default=18, ge=1, le=120)  # 场景权重衰减半期，单位月。
+    high_fit_support_threshold: float = Field(default=1.5, ge=1, le=3, allow_inf_nan=False)  # 不同实质依据数×场景权重，默认至少1.5。
+
+    @model_validator(mode='after')
+    def check_focus_month(self) -> Self:
+        import re
+
+        if self.focus_since is not None and not re.fullmatch(r'\d{4}-(?:0[1-9]|1[0-2])', self.focus_since):
+            raise ValueError('项目重点起点须为YYYY-MM')
+        return self
 
 
 class Candidate(ConfigModel):
@@ -46,9 +81,22 @@ class Candidate(ConfigModel):
     target_roles: list[str] = Field(default_factory=list)
     preferred_cities: list[str] = Field(default_factory=list)
     projects: list[ProjectExperience] = Field(default_factory=list)
+    project_weighting: ProjectWeighting = Field(default_factory=ProjectWeighting)
+    confirmed_highlight_fields: list[str] = Field(default_factory=list)  # 用户确认的优势字段路径；事实仍来自原技能/项目。
+    confirmed_primary_projects: list[int] = Field(default_factory=list)  # 用户确认的重点项目索引，不删除其他历史项目。
     match_basis: Literal["business_scenario_and_responsibilities"] = (
         "business_scenario_and_responsibilities"
     )
+
+    @model_validator(mode='after')
+    def check_expected_salary(self) -> Self:
+        """月薪单位千元；有值时须成对、为正数且下界不大于上界。"""
+        lower, upper = self.expected_salary_min, self.expected_salary_max
+        if (lower is None) != (upper is None):
+            raise ValueError('期望月薪上下界须同时填写或同时未知')
+        if lower is not None and (lower <= 0 or upper <= 0 or lower > upper):
+            raise ValueError('期望月薪须大于0且下界不大于上界')
+        return self
 
 
 class Search(ConfigModel):
@@ -123,7 +171,7 @@ class Execution(ConfigModel):
     save_debug_screenshot_on_error: bool
     skip_previously_decided: bool
     allow_list_scroll: bool = False  # 是否允许滚动岗位列表加载下一批，不授权沟通。
-    max_scroll_rounds: int = Field(default=0, ge=0, le=20)  # 当前运行最多扩展列表的次数。
+    max_scroll_rounds: int = Field(default=0, ge=0, le=200)  # 列表扩展安全上限；apply优先按已确认沟通目标停止，不保证凑满。
     communication_target: int = Field(default=50, ge=0, le=150)  # 本次沟通人数，CLI可覆盖；0不启动投递。
     apply_max_jobs: int = Field(default=200, ge=1, le=200)  # 投递时最多评审的新岗位数，不为凑满人数无限搜索。
     record_action_lists: bool = False  # 默认不保存公司/岗位名单；不影响额度与防重最小日志。

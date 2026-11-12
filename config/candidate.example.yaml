@@ -3,8 +3,11 @@ education:
   level: null
   school_tier: null
   is_full_time: null
+  admission_route: null
+  records: []
 skills:
   strengths: []
+  technologies: []
   not_target_roles: []
 languages:
   english_fluent: null
@@ -17,3 +20,9 @@ resume_summary: ''
 target_roles: []
 preferred_cities: []
 projects: []
+project_weighting:
+  enabled: true
+  focus_since: null
+  focus_window_months: 30
+  half_life_months: 18
+  high_fit_support_threshold: 1.5

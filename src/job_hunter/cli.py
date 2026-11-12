@@ -1,6 +1,7 @@
 import asyncio
 import shlex
 import sys
+from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
@@ -15,7 +16,13 @@ from job_hunter.browser.guard import ConnectionGuard
 from job_hunter.browser.session import CHROME_PATH, AgentSession
 from job_hunter.evaluation.model import ModelEvaluator
 from job_hunter.evaluation.rules import ENGINE
-from job_hunter.settings import ConfigurationError, load_settings, load_user_config
+from job_hunter.settings import (
+    ConfigurationError,
+    load_settings,
+    load_user_config,
+    profile_path,
+    selected_profile,
+)
 from job_hunter.storage.run_log import RunLog
 from job_hunter.workflows.scan import scan_in_session
 
@@ -24,6 +31,107 @@ console = Console()
 errors = Console(stderr=True)
 Endpoint = Annotated[str | None, typer.Option(envvar="BROWSER_CDP_ENDPOINT")]
 PageIndex = Annotated[int | None, typer.Option(min=1)]
+
+
+@app.callback()
+def select_profile(
+    context: typer.Context,
+    profile: Annotated[str | None, typer.Option(envvar='JOB_AGENT_PROFILE', help='选择命名用户配置；省略则沿用原config配置')] = None,
+):
+    """只选择本次命令的配置，不自动切换浏览器账号、启动评审或投递。"""
+    if profile is not None:
+        try:
+            profile_path(profile)
+        except ConfigurationError as error:
+            errors.print(str(error), markup=False)
+            raise typer.Exit(1) from None
+    token = selected_profile.set(profile)
+    context.call_on_close(lambda: selected_profile.reset(token))
+
+
+@app.command('configure')
+def configure_command(
+    from_json: Annotated[Path | None, typer.Option(help='Agent提供的结构化草稿；默认仅预览')] = None,
+    save: Annotated[bool, typer.Option(help='校验并展示摘要后保存草稿；不启动业务')] = False,
+    overwrite: Annotated[bool, typer.Option(help='显式更新同名命名配置，不修改原config用户')] = False,
+    show: Annotated[bool, typer.Option(help='只读显示所选命名配置摘要')] = False,
+):
+    """中文新用户配置向导；不编辑YAML、不连接浏览器或模型、不投递。"""
+    from job_hunter.onboarding import configure
+
+    try:
+        configure(console, from_json, save, overwrite, show)
+    except ConfigurationError as error:
+        errors.print(str(error), markup=False)
+        raise typer.Exit(1) from None
+
+
+@app.command('resume-import')
+def resume_import_command(file: Annotated[Path, typer.Argument(help='本机.docx或文本PDF路径')]):
+    """本地提取简历，生成有原文依据的待确认画像草稿，不覆盖正式画像。"""
+    from job_hunter.resume_import import make_draft, write_draft
+    from job_hunter.resume_review import preview
+
+    try:
+        name = selected_profile.get()
+        configured = profile_path(name).is_file() if name else Path('config/preferences.yaml').is_file()
+        candidate = load_user_config()[1] if configured else None
+        draft = make_draft(file, candidate, name)
+        path, review = write_draft(draft)
+        console.print(preview(draft, candidate), markup=False)
+        console.print(f'本地提取：{draft.source.pages or "DOCX按段落定位"}页/段落模式，{len(draft.source.lines)}行，候选{len(draft.proposals)}组。', markup=False)
+        console.print(f'草稿：{path}\n原文依据：{review}\n正式画像未修改。', markup=False)
+    except (ConfigurationError, OSError) as error:
+        errors.print(str(error) if isinstance(error, ConfigurationError) else '草稿保存失败，请核对本机文件权限', markup=False)
+        raise typer.Exit(1) from None
+
+
+@app.command('resume-intake')
+def resume_intake_command(file: Annotated[Path | None, typer.Argument(help='客户提供的本机PDF或.docx；省略则先询问')] = None):
+    """客户简历入口：先请求文件，本地解析，再用配置的DeepSeek生成有据待确认画像。"""
+    if file is None:
+        supplied = typer.prompt('请提供PDF或Word(.docx)简历（本机路径或拖入文件）').strip().strip('\"\'')
+        if not supplied:
+            raise typer.Exit(1)
+        file = Path(supplied)
+    run(_resume_intake(file))
+
+
+async def _resume_intake(file: Path):
+    """不启动BOSS或投递；模型失败立即报错，不把纯本地提取冒充DeepSeek画像。"""
+    from job_hunter.resume_import import write_draft
+    from job_hunter.resume_review import preview
+    from job_hunter.resume_semantic import generate_profile
+
+    name = selected_profile.get()
+    configured = profile_path(name).is_file() if name else Path('config/preferences.yaml').is_file()
+    candidate = load_user_config()[1] if configured else None
+    settings = load_settings()
+    console.print('本机解析PDF/Word；仅必要脱敏文字与证据编号送至配置的DeepSeek；不发送图片。', markup=False)
+    draft = await generate_profile(file, candidate, name, settings)
+    try:
+        path, review = write_draft(draft)
+    except OSError:
+        raise ConfigurationError('画像草稿保存失败，请核对本机文件权限') from None
+    console.print(preview(draft, candidate), markup=False)
+    console.print(f'DeepSeek有据画像已生成，仍待用户确认。\n草稿：{path}\n原文与权重：{review}', markup=False)
+
+
+@app.command('resume-review')
+def resume_review_command(
+    draft: Annotated[Path, typer.Argument(help='resume-import生成的draft.json')],
+    show: Annotated[bool, typer.Option(help='只读显示摘要，不保存')] = False,
+    accept: Annotated[str | None, typer.Option(help='已由用户确认的具体f编号，逗号分隔；默认逐项交互')] = None,
+    save: Annotated[bool, typer.Option(help='仅保存明确选择且已确认的字段，不启动业务')] = False,
+):
+    """原文核对、用户更正及确认保存；不把草稿直接视为用户事实。"""
+    from job_hunter.resume_review import review_command
+
+    try:
+        review_command(draft, console, show, accept, save)
+    except (ConfigurationError, OSError) as error:
+        errors.print(str(error) if isinstance(error, ConfigurationError) else '画像保存失败，请核对本机文件权限', markup=False)
+        raise typer.Exit(1) from None
 
 
 def run(awaitable):
@@ -236,7 +344,7 @@ def scan(
     endpoint: Endpoint = None,
     page: PageIndex = None,
     limit: Annotated[int | None, typer.Option(min=1, max=200, help='本轮最多判断的去重岗位数，包含续用结果')] = None,
-    scroll_rounds: Annotated[int | None, typer.Option(min=0, max=20, help='最多扩展列表的次数；0表示不扩展')] = None,
+    scroll_rounds: Annotated[int | None, typer.Option(min=0, max=200, help='最多扩展列表的次数；0表示不扩展')] = None,
     resume_run: Annotated[str | None, typer.Option(help='显式沿用同条件、画像和规则版本的运行判断')] = None,
     engine: Annotated[Literal['model', 'rules'], typer.Option(help='model调用.env模型；rules显式使用本地规则')] = 'model',
 ):
@@ -261,6 +369,11 @@ async def _scan(endpoint, index, limit, scroll_rounds, resume_run=None, engine_m
         preferences.execution.max_scroll_rounds = scroll_rounds
         preferences.execution.allow_list_scroll = scroll_rounds > 0
     validate_filters(preferences.search)
+    if engine_mode == 'rules':
+        from job_hunter.onboarding import PRESETS
+
+        if any(rule.enabled and rule.id not in PRESETS for rule in preferences.hard_exclusions):
+            raise ConfigurationError('自定义硬排除需要model引擎；本地rules不会静默忽略')
     evaluator = ModelEvaluator(settings, preferences, candidate) if engine_mode == 'model' else None
     engine_id = evaluator.engine if evaluator is not None else ENGINE
     log = RunLog(preferences, candidate)
@@ -375,6 +488,35 @@ async def _communicate_current_one(endpoint, index, candidate_ids=None):
         emit({'event':'run_end','status':'stopped','error_type':type(error).__name__,'reason':str(error)})
         raise
     emit({'event':'run_end','status':'completed',**summary})
+
+
+@app.command('detail-response-check')
+def detail_response_check(endpoint: Endpoint = None, page: PageIndex = None):
+    """只读比较一个岗位的页面自然详情响应、DOM及薪资；不调用模型或投递。"""
+    run(_detail_response_check(endpoint, page))
+
+
+async def _detail_response_check(endpoint, index):
+    """同一连接完成一次诊断，仅保存无JD、无Cookie的比较摘要。"""
+    import json
+    from datetime import datetime
+    from pathlib import Path
+    from zoneinfo import ZoneInfo
+
+    from job_hunter.extraction.detail_response import probe_detail_response
+
+    settings = load_settings()
+    console.print('只读诊断：当前列表1个岗位；无模型、收藏、沟通；不重连补查。')
+    async with AgentSession(endpoint or discover_endpoint(), index, settings.agent_browser_binary) as active:
+        await active.bring_to_front()
+        summary = await probe_detail_response(active)
+    stamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
+    directory = Path(__file__).resolve().parents[2] / '.local/diagnostics/detail-response'
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f'{stamp}.json'
+    path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n')
+    console.print(summary, markup=False)
+    console.print(f'诊断摘要：{path}；连接已退出，Chrome保留。', markup=False)
 
 
 @app.command('salary-check')

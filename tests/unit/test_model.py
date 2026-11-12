@@ -171,3 +171,29 @@ def test_explicit_skill_in_duty_can_be_assessed(evaluator, detail):
     decision = evaluator.validate(json.dumps(data), detail, {})
     assert decision.status == 'HIGH_FIT'
     assert decision.requirements[0]['section'] == '岗位职责'
+
+
+@pytest.mark.parametrize(('period', 'expected'), [('2022.01-2023.01', 'GENERAL'), ('2026.01-至今', 'HIGH_FIT')])
+def test_formal_model_applies_project_recency_after_evidence_validation(evaluator, period, expected):
+    from datetime import date
+
+    from job_hunter.evaluation.recency import project_weights
+
+    candidate = Candidate(projects=[{'name': '本地匿名', 'period': period, 'business_scenario': '研发工具',
+                                     'responsibilities': ['Agent执行机制', '质量评测'], 'technologies': ['Python']}],
+                          project_weighting={'enabled': True, 'focus_since': '2024-01'})
+    evaluator.profile['project_weighting'] = candidate.project_weighting.model_dump()
+    evaluator.weights = project_weights(candidate, date(2026, 11, 11))
+    job = JobDetail(JobCard('/job_detail/test.html', 'Agent工程师', '公司', '上海'),
+                    '岗位职责\n负责Agent执行机制。\n负责质量评测。\n任职要求\n熟悉Python', '上海', '')
+    data = output(evaluator)
+    data['profile_matches'].append({**data['profile_matches'][0], 'passage_id': 'd1', 'profile_item_index': 1})
+    assert evaluator.validate(json.dumps(data), job, {}).status == expected
+
+
+def test_confirmed_resume_focus_is_in_model_payload(evaluator):
+    candidate = Candidate(confirmed_highlight_fields=['skills.strengths.0'],
+                          confirmed_primary_projects=[0])
+    updated = model.ModelEvaluator(evaluator.settings, evaluator.preferences, candidate)
+    assert updated.profile['confirmed_highlight_fields'] == ['skills.strengths.0']
+    assert updated.profile['confirmed_primary_projects'] == [0]

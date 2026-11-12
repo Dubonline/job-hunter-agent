@@ -1,3 +1,5 @@
+import re
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Literal, Self
 
@@ -10,6 +12,21 @@ from job_hunter.models.preferences import Candidate, ConfigModel, Preferences
 
 class ConfigurationError(Exception):
     pass
+
+selected_profile: ContextVar[str | None] = ContextVar('job_agent_profile', default=None)
+
+
+def profile_path(name: str) -> Path:
+    """只接受简短配置名称，固定保存在受忽略的.local/profiles下，不接受路径。"""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,47}', name):
+        raise ConfigurationError('配置名称须为1–48位字母、数字、短横线或下划线，首位为字母或数字')
+    return Path('.local/profiles') / name / 'config.yaml'
+
+
+class UserProfile(ConfigModel):
+    """新用户的检索条件与画像成对保存，避免只更新其中一份。"""
+    preferences: Preferences
+    candidate: Candidate
 
 
 class Settings(BaseSettings):
@@ -89,6 +106,9 @@ def load_yaml[Model: ConfigModel](path: Path, model: type[Model]) -> Model:
 
 
 def load_user_config() -> tuple[Preferences, Candidate]:
+    if name := selected_profile.get():
+        profile = load_yaml(profile_path(name), UserProfile)
+        return profile.preferences, profile.candidate
     preferences = load_yaml((Path("config/preferences.local.yaml") if Path("config/preferences.local.yaml").exists() else Path("config/preferences.example.yaml")), Preferences)
     candidate_path = Path("config/candidate.yaml")
     if not candidate_path.exists():
